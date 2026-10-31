@@ -1,43 +1,61 @@
 # bot-runner
 
 The execution service for [bot-orchestrator](https://github.com/hametovbr/bot-orchestrator):
-it runs user-written Telegram bot handlers in an isolated container.
+it runs user-written Telegram bot handlers.
 
-> **Status:** early design stage. Nothing here is usable yet.
+> **Status:** MVP. Deploy it with the `docker-compose.yml` from bot-orchestrator.
 
-## What it does
+## How it works
 
-- Receives an update, the bot it belongs to and a handler version from the
-  orchestrator, and runs that handler with a timeout.
-- Loads new handler versions without restarting.
-- Gives handlers a small SDK (`ctx`) for Bot API calls, files on the shared
-  volume, key-value storage, secrets, HTTP requests and external tools such as
-  `yt-dlp`.
-- Runs long tasks (downloads, conversions) in a background queue so the bot can
-  reply right away and send the result later.
+- The orchestrator sends `POST /run` with the update, the bot, the handler code
+  and its secrets.
+- The runner starts a fresh Python process for the run, with a time limit
+  (`HANDLER_TIMEOUT`) and a memory limit (`HANDLER_MEMORY_MB`). A crash or a hang
+  only affects that run.
+- Handler output (`print`, `ctx.log`) and every Bot API call are streamed back and
+  shown in the orchestrator's update log. Bot tokens are masked.
+- In a dry run, only `get*` Bot API methods reach Telegram; other calls are
+  recorded and not sent.
 
-A failing or hanging handler only affects its own run: the orchestrator and
-other bots keep working.
+The image includes `yt-dlp` (as a library and a command) and `ffmpeg`.
 
 ## Example handler
 
 ```python
+import datetime as dt
+
+
 async def handle(update, ctx):
-    doc = update.message.document
-    path = await ctx.files.local_path(doc.file_id)
-    saved = ctx.files.move(path, f"inbox/{update.message.date:%Y-%m-%d}_{doc.file_name}")
-    await ctx.reply(f"Saved: {saved}")
+    msg = update.message
+    if msg and msg.document:
+        day = dt.date.fromtimestamp(msg.date).isoformat()
+        path = await ctx.files.local_path(msg.document.file_id)
+        saved = ctx.files.move(path, f"inbox/{day}_{ctx.files.safe_name(msg.document.file_name)}")
+        await ctx.reply(f"Saved {saved.name}")
 ```
 
-The SDK is a draft and will change. See the
-[architecture document](https://github.com/hametovbr/bot-orchestrator/blob/main/docs/ARCHITECTURE.md)
-in bot-orchestrator for the full design.
+The SDK reference is in the
+[architecture document](https://github.com/hametovbr/bot-orchestrator/blob/main/docs/ARCHITECTURE.md#handler-sdk)
+and on the orchestrator's Handler tab.
+
+## Configuration
+
+All settings are environment variables; see [.env.example](.env.example).
+
+## Development
+
+```sh
+uv sync
+uv run pytest
+uv run ruff check . && uv run ruff format --check .
+uv run uvicorn --factory bot_runner.server:app --reload   # needs RUNNER_SECRET
+```
 
 ## Security
 
-Handlers are arbitrary code. The runner is meant to run without the Docker
-socket, with CPU and memory limits, and with write access only to the bot files
-folder. See [SECURITY.md](SECURITY.md).
+Handlers are arbitrary code from the orchestrator's UI. Process isolation protects
+the system from handler bugs; it is not a sandbox for untrusted authors. See
+[SECURITY.md](SECURITY.md).
 
 ## License
 
