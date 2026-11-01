@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import io
 import json
+import site
 import sys
 import traceback
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from . import shared_modules
 from .masking import mask, mask_value
 from .sdk import BotApi, Context, Files, _Internal, dumps
 
@@ -58,12 +60,23 @@ class _PrintToLog(io.TextIOBase):
 
 
 def load_module(code: str, name: str) -> dict[str, Any]:
+    filename = f"<{name}>"
+    shared_modules.register_source(filename, code)
     namespace: dict[str, Any] = {"__name__": name}
-    exec(compile(code, f"<{name}>", "exec"), namespace)  # noqa: S102
+    exec(compile(code, filename, "exec"), namespace)  # noqa: S102
     return namespace
 
 
+def prepare_imports(job: dict) -> None:
+    """Extra packages go after the runner's own libraries; shared modules on top."""
+    packages = job["config"].get("packages_path")
+    if packages:
+        site.addsitedir(packages)
+    shared_modules.install(job.get("modules") or {})
+
+
 async def run_job(job: dict, events: _Events) -> None:
+    prepare_imports(job)
     config = job["config"]
     bot = job["bot"]
     handler = job.get("handler") or {}

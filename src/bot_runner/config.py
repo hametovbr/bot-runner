@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     max_concurrent_tasks: int = 2
     # Read-only folder handlers may read from, e.g. cookies files ("" disables).
     shared_read_dir: str = "/shared"
+    # Persistent folder for extra Python packages installed from the orchestrator.
+    packages_dir: str = "/packages"
 
 
 @lru_cache

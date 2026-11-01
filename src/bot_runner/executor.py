@@ -11,6 +11,7 @@ from typing import Any
 
 from .config import Settings
 from .masking import mask
+from .packages import PackageManager
 from .worker import MARKER
 
 MAX_LOG_LINES = 500
@@ -34,8 +35,9 @@ def _memory_limit(megabytes: int):
 class Executor:
     """Runs jobs in subprocesses. Handlers and background tasks have separate limits."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, packages: PackageManager | None = None):
         self._settings = settings
+        self._packages = packages
         self._slots = {
             "handler": asyncio.Semaphore(settings.max_concurrent_runs),
             "task": asyncio.Semaphore(settings.max_concurrent_tasks),
@@ -57,6 +59,9 @@ class Executor:
         process.kill()
         return True
 
+    def _packages_env(self):
+        return self._packages.current_env() if self._packages else None
+
     async def _run(self, job: dict[str, Any], kind: str) -> dict[str, Any]:
         s = self._settings
         limit = s.task_timeout if kind == "task" else s.handler_timeout
@@ -72,6 +77,7 @@ class Executor:
                 "files_root": s.files_root,
                 "bot_api_data_dir": s.bot_api_data_dir,
                 "shared_read_dir": s.shared_read_dir,
+                "packages_path": str(env) if (env := self._packages_env()) else None,
             },
         }
         logs: list[str] = []

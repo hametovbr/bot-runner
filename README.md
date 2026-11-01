@@ -3,7 +3,7 @@
 The execution service for [bot-orchestrator](https://github.com/hametovbr/bot-orchestrator):
 it runs user-written Telegram bot handlers.
 
-> **Status:** 0.2. Deploy it with the `docker-compose.yml` from bot-orchestrator.
+> **Status:** 0.3. Deploy it with the `docker-compose.yml` from bot-orchestrator.
 
 ## How it works
 
@@ -16,6 +16,12 @@ it runs user-written Telegram bot handlers.
 - Handlers and tasks have separate concurrency limits (`MAX_CONCURRENT_RUNS`,
   `MAX_CONCURRENT_TASKS`), so long downloads never block replies.
 - `POST /cancel/{run_id}` kills a running job.
+- Shared modules sent with the job are importable as `shared.<name>`; tracebacks
+  show their source lines.
+- `GET/POST /packages` reports and installs extra Python packages into
+  `PACKAGES_DIR` with uv. A new list goes into its own folder and becomes active
+  only after a successful install; the runner's own dependencies keep their
+  versions.
 - Handler output (`print`, `ctx.log`) and every Bot API call are streamed back and
   shown in the orchestrator's update log. Bot tokens are masked.
 - In a dry run, only `get*` Bot API methods reach Telegram; other calls are

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .config import Settings, get_settings
 from .executor import Executor
+from .packages import PackageManager
 
 
 class BotInfo(BaseModel):
@@ -35,10 +36,16 @@ class RunRequest(BaseModel):
     task: dict[str, Any] | None = None
     #: Opaque data the orchestrator wants back in tasks this run starts (e.g. its log row).
     origin: dict[str, Any] = Field(default_factory=dict)
+    #: Shared modules importable as shared.<name>: {name: {"version": 3, "code": "..."}}.
+    modules: dict[str, dict[str, Any]] = Field(default_factory=dict)
     update: dict[str, Any]
     secrets: dict[str, str] = Field(default_factory=dict)
     dry_run: bool = False
     timeout: float | None = None
+
+
+class PackagesRequest(BaseModel):
+    requirements: str
 
 
 class RunResult(BaseModel):
@@ -51,7 +58,8 @@ class RunResult(BaseModel):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    executor = Executor(settings)
+    packages = PackageManager(settings.packages_dir)
+    executor = Executor(settings, packages)
     app = FastAPI(title="bot-runner", version=__version__, docs_url=None, redoc_url=None)
 
     def check_secret(x_runner_secret: Annotated[str | None, Header()] = None) -> None:
@@ -65,6 +73,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/run", dependencies=[Depends(check_secret)])
     async def run(request: RunRequest) -> RunResult:
         return RunResult(**await executor.run(request.model_dump()))
+
+    @app.get("/packages", dependencies=[Depends(check_secret)])
+    async def packages_status() -> dict[str, Any]:
+        return packages.status()
+
+    @app.post("/packages", dependencies=[Depends(check_secret)], status_code=202)
+    async def packages_install(request: PackagesRequest) -> dict[str, Any]:
+        try:
+            packages.start(request.requirements)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return packages.status()
+
+    app.state.packages = packages
 
     @app.post("/cancel/{run_id}", dependencies=[Depends(check_secret)])
     async def cancel(run_id: str) -> dict[str, bool]:

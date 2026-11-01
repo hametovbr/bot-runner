@@ -151,6 +151,7 @@ def settings(fake, tmp_path: Path) -> Settings:
         task_timeout=30,
         handler_memory_mb=0,
         shared_read_dir=str(tmp_path / "shared"),
+        packages_dir=str(tmp_path / "packages"),
     )
 
 
