@@ -1,4 +1,4 @@
-"""Test fixtures: a fake Telegram Bot API + orchestrator KV server in a background thread."""
+"""Test fixtures: a fake Telegram Bot API + orchestrator internal API in a background thread."""
 
 from __future__ import annotations
 
@@ -22,6 +22,9 @@ class FakeServer:
     def __init__(self, api_data_dir: Path):
         self.calls: list[tuple[str, dict]] = []
         self.kv: dict[str, object] = {}
+        self.tasks: dict[int, dict] = {}
+        self.progress: list[tuple[int, str]] = []
+        self.media = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200_000
         self.api_data_dir = api_data_dir
         self.app = self._build()
 
@@ -41,11 +44,11 @@ class FakeServer:
             if method == "getFile":
                 path = self.api_data_dir / TOKEN / "documents" / "file_1.pdf"
                 return {"ok": True, "result": {"file_id": body["file_id"], "file_path": str(path)}}
-            if method == "sendMessage":
+            if method in ("sendMessage", "editMessageText"):
                 return {
                     "ok": True,
                     "result": {
-                        "message_id": 1,
+                        "message_id": body.get("message_id", 1),
                         "text": body["text"],
                         "chat": {"id": body["chat_id"]},
                     },
@@ -70,6 +73,38 @@ class FakeServer:
         async def kv_delete(bot_id: int, key: str):
             self.kv.pop(key, None)
             return {"ok": True}
+
+        @app.post("/internal/tasks")
+        async def task_create(request: Request):
+            assert request.headers["x-runner-secret"] == SECRET
+            task_id = len(self.tasks) + 1
+            self.tasks[task_id] = {**(await request.json()), "status": "queued"}
+            return {"id": task_id}
+
+        @app.get("/internal/tasks/{task_id}")
+        async def task_get(task_id: int, bot_id: int):
+            task = self.tasks.get(task_id)
+            if not task or task["bot_id"] != bot_id:
+                return Response(status_code=404)
+            return {"id": task_id, "title": task["title"], "status": task["status"]}
+
+        @app.post("/internal/tasks/{task_id}/cancel")
+        async def task_cancel(task_id: int):
+            task = self.tasks.get(task_id)
+            if not task:
+                return Response(status_code=404)
+            cancelled = task["status"] == "queued"
+            task["status"] = "cancelled"
+            return {"cancelled": cancelled}
+
+        @app.post("/internal/tasks/{task_id}/progress")
+        async def task_progress(task_id: int, request: Request):
+            self.progress.append((task_id, (await request.json())["text"]))
+            return {"ok": True}
+
+        @app.get("/media/sample.mp4")
+        async def media():
+            return Response(self.media, media_type="video/mp4")
 
         return app
 
@@ -113,7 +148,9 @@ def settings(fake, tmp_path: Path) -> Settings:
         files_root=str(tmp_path / "files"),
         bot_api_data_dir=str(fake.api_data_dir),
         handler_timeout=20,
+        task_timeout=30,
         handler_memory_mb=0,
+        shared_read_dir=str(tmp_path / "shared"),
     )
 
 
@@ -138,6 +175,7 @@ def make_job(code: str, **extra) -> dict:
         "bot": {"id": 123456, "username": "test_bot", "token": TOKEN},
         "code": code,
         "version": 1,
+        "handler": {"id": 7, "name": "main"},
         "update": update,
         **extra,
     }

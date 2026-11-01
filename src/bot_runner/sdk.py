@@ -1,4 +1,4 @@
-"""The `ctx` object handlers receive: Bot API, files, key-value storage, secrets, logs."""
+"""The `ctx` object handlers receive: Bot API, files, storage, tasks, secrets, logs."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,12 +147,14 @@ class Files:
     """File access scoped to the bot's folder on the shared volume.
 
     Paths are relative to the bot folder. Files downloaded by the local Bot API server
-    may be read from its data directory, but writes always land in the bot folder.
+    and files in the shared read-only folder may be read, but writes always land in the
+    bot folder.
     """
 
-    def __init__(self, root: Path, api_data_dir: Path, api: BotApi):
+    def __init__(self, root: Path, api_data_dir: Path, api: BotApi, shared_dir: Path | None = None):
         self.root = root
         self._api_data_dir = api_data_dir
+        self._shared_dir = shared_dir
         self._api = api
 
     def path(self, relative: str | Path = ".") -> Path:
@@ -167,10 +170,13 @@ class Files:
         cleaned = _UNSAFE_NAME.sub("_", name).replace("/", "_").strip(" .")
         return cleaned or "file"
 
-    def _readable(self, source: str | Path) -> Path:
+    def readable(self, source: str | Path) -> Path:
+        """Resolve a path the handler may read: the bot folder, Bot API files, shared files."""
         source = Path(source)
         resolved = source.resolve() if source.is_absolute() else self.path(source)
-        allowed = (self.root.resolve(), self._api_data_dir.resolve())
+        allowed = [self.root.resolve(), self._api_data_dir.resolve()]
+        if self._shared_dir:
+            allowed.append(self._shared_dir.resolve())
         if not any(resolved.is_relative_to(base) for base in allowed):
             raise ValueError(f"cannot read outside the bot folder: {source}")
         return resolved
@@ -195,7 +201,7 @@ class Files:
         raise FileExistsError(target)
 
     def copy(self, source: str | Path, destination: str | Path, overwrite: bool = False) -> Path:
-        src = self._readable(source)
+        src = self.readable(source)
         dst = self.path(destination)
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not overwrite:
@@ -206,12 +212,12 @@ class Files:
     def move(self, source: str | Path, destination: str | Path, overwrite: bool = False) -> Path:
         """Move a file into the bot folder. Returns the final path.
 
-        If the source cannot be removed (for example, the Bot API server owns it), the
-        file is copied and the original is left for the server's cache cleanup.
+        If the source cannot be removed (for example, it is read-only), the file is
+        copied and the original is left in place.
         """
         dst = self.copy(source, destination, overwrite=overwrite)
         try:
-            self._readable(source).unlink()
+            self.readable(source).unlink()
         except OSError:
             pass
         return dst
@@ -226,7 +232,7 @@ class Files:
         return self.write_bytes(destination, text.encode())
 
     def read_bytes(self, source: str | Path) -> bytes:
-        return self._readable(source).read_bytes()
+        return self.readable(source).read_bytes()
 
     def read_text(self, source: str | Path) -> str:
         return self.read_bytes(source).decode()
@@ -239,31 +245,81 @@ class Files:
         return self.path(relative).exists()
 
 
+class _Internal:
+    """Client for the orchestrator's internal API."""
+
+    def __init__(self, http: httpx.AsyncClient, base_url: str, secret: str):
+        self.http = http
+        self.base = base_url.rstrip("/") + "/internal/"
+        self.headers = {"X-Runner-Secret": secret}
+
+    async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        return await self.http.request(method, self.base + path, headers=self.headers, **kwargs)
+
+
 class KV:
     """Per-bot key-value storage kept by the orchestrator. Values are JSON."""
 
-    def __init__(self, http: httpx.AsyncClient, base_url: str, secret: str, bot_id: int):
-        self._http = http
-        self._base = f"{base_url.rstrip('/')}/internal/kv/{bot_id}/"
-        self._headers = {"X-Runner-Secret": secret}
+    def __init__(self, internal: _Internal, bot_id: int):
+        self._internal = internal
+        self._prefix = f"kv/{bot_id}/"
 
     async def get(self, key: str, default: Any = None) -> Any:
-        response = await self._http.get(self._base + key, headers=self._headers)
+        response = await self._internal.request("GET", self._prefix + key)
         if response.status_code == 404:
             return default
         response.raise_for_status()
         return response.json()["value"]
 
     async def set(self, key: str, value: Any) -> None:
-        response = await self._http.put(
-            self._base + key, headers=self._headers, json={"value": value}
-        )
+        response = await self._internal.request("PUT", self._prefix + key, json={"value": value})
         response.raise_for_status()
 
     async def delete(self, key: str) -> None:
-        response = await self._http.delete(self._base + key, headers=self._headers)
+        response = await self._internal.request("DELETE", self._prefix + key)
         if response.status_code != 404:
             response.raise_for_status()
+
+
+class Tasks:
+    """Background tasks of this bot: ``await ctx.tasks.get(id)``, ``await ctx.tasks.cancel(id)``."""
+
+    def __init__(self, internal: _Internal, bot_id: int):
+        self._internal = internal
+        self._bot_id = bot_id
+
+    async def create(self, payload: dict[str, Any]) -> int:
+        response = await self._internal.request(
+            "POST", "tasks", json={**payload, "bot_id": self._bot_id}
+        )
+        response.raise_for_status()
+        return response.json()["id"]
+
+    async def get(self, task_id: int) -> Obj | None:
+        """Status of a task: id, title, status, progress, error."""
+        response = await self._internal.request(
+            "GET", f"tasks/{int(task_id)}", params={"bot_id": self._bot_id}
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return Obj(response.json())
+
+    async def cancel(self, task_id: int) -> bool:
+        """Cancel a queued or running task. Returns False if it had already finished."""
+        response = await self._internal.request(
+            "POST", f"tasks/{int(task_id)}/cancel", json={"bot_id": self._bot_id}
+        )
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return bool(response.json()["cancelled"])
+
+    async def progress(self, task_id: int, text: str) -> None:
+        response = await self._internal.request(
+            "POST", f"tasks/{int(task_id)}/progress", json={"bot_id": self._bot_id, "text": text}
+        )
+        response.raise_for_status()
 
 
 @dataclass
@@ -290,7 +346,24 @@ def chat_id_of(update: dict) -> int | None:
     for key in ("my_chat_member", "chat_member", "chat_join_request", "message_reaction"):
         if key in update:
             return update[key]["chat"]["id"]
+    # Updates created by schedules may carry a chat.
+    schedule = update.get("schedule")
+    if schedule and schedule.get("chat"):
+        return schedule["chat"]["id"]
     return None
+
+
+def _plain(value: Any) -> Any:
+    """Arguments of background tasks travel as JSON; paths become strings."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Obj):
+        return value.to_dict()
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(v) for v in value]
+    return value
 
 
 class Context:
@@ -303,36 +376,61 @@ class Context:
         bot: dict,
         api: BotApi,
         files: Files,
-        kv: KV,
+        internal: _Internal,
         secrets: dict[str, str],
         http: httpx.AsyncClient,
         emit: Emit,
         dry_run: bool,
+        handler: dict | None = None,
+        task: dict | None = None,
+        code: str = "",
+        origin: dict | None = None,
     ):
         self.update = Obj(update)
         self.bot = Obj(bot)
         self.api = api
         self.files = files
-        self.kv = kv
+        self.kv = KV(internal, bot["id"])
+        self.tasks = Tasks(internal, bot["id"])
         self.secrets = dict(secrets)
         self.http = http
         self.dry_run = dry_run
+        self.handler = Obj(handler or {})
+        #: The current background task (id, title), or None inside a handler.
+        self.task = Obj(task) if task else None
         self._emit = emit
         self._chat_id = chat_id_of(update)
+        self._code = code
+        self._origin = origin or {}
+        self._namespace: dict[str, Any] = {}
+        self._last_progress = 0.0
 
     @property
     def chat_id(self) -> int | None:
         return self._chat_id
 
-    def log(self, *values: Any) -> None:
+    def log(self, *values: Any, sep: str = " ") -> None:
         """Write a line to the update log."""
-        self._emit("log", " ".join(str(v) for v in values))
+        self._emit("log", sep.join(str(v) for v in values))
 
     async def reply(self, text: str, **params: Any) -> Any:
         """Send a message to the chat the update came from."""
         if self._chat_id is None:
             raise RuntimeError("this update has no chat to reply to")
         return await self.api.call("sendMessage", chat_id=self._chat_id, text=text, **params)
+
+    async def reply_file(
+        self, path: str | Path, caption: str | None = None, kind: str = "auto", **params: Any
+    ) -> Any:
+        """Send a file to the chat of the update: video, audio, photo, animation or document.
+
+        ``kind="auto"`` picks the method from the file extension.
+        """
+        from .media import send_file
+
+        if self._chat_id is None:
+            raise RuntimeError("this update has no chat to reply to")
+        return await send_file(self, self._chat_id, path, caption, kind, **params)
 
     async def answer_callback(self, text: str | None = None, **params: Any) -> Any:
         """Answer the callback query of the current update."""
@@ -343,13 +441,91 @@ class Context:
             "answerCallbackQuery", callback_query_id=query.id, text=text, **params
         )
 
+    async def background(
+        self, func: Callable, /, *args: Any, title: str | None = None, **kwargs: Any
+    ) -> int | None:
+        """Run ``func(ctx, *args, **kwargs)`` as a background task and return its id.
+
+        ``func`` must be defined at the top level of the handler code. Arguments travel as
+        JSON (paths become strings). The task gets the same update, so ``ctx.reply`` works
+        there too. In a dry run nothing is started and None is returned.
+        """
+        name = getattr(func, "__name__", "")
+        if not callable(func) or self._namespace.get(name) is not func:
+            raise ValueError(
+                "ctx.background needs a function defined at the top level of the handler code"
+            )
+        if name == "handle":
+            raise ValueError("handle() cannot run as a background task")
+        args_plain, kwargs_plain = _plain(list(args)), _plain(kwargs)
+        try:
+            json.dumps([args_plain, kwargs_plain])
+        except TypeError:
+            raise TypeError(
+                "arguments of a background task must be JSON values (str, int, list, dict...)"
+            ) from None
+        title = (title or name)[:200]
+        record = {
+            "method": "background",
+            "params": mask_value({"function": name, "title": title, "args": args_plain}),
+        }
+        if self.dry_run:
+            self._emit("api", {**record, "ok": True, "dry_run": True})
+            return None
+        try:
+            task_id = await self.tasks.create(
+                {
+                    "handler": self.handler.to_dict(),
+                    "code": self._code,
+                    "entry": name,
+                    "args": args_plain,
+                    "kwargs": kwargs_plain,
+                    "title": title,
+                    "update": self.update.to_dict(),
+                    "origin": self._origin,
+                }
+            )
+        except httpx.HTTPError as exc:
+            self._emit("api", {**record, "ok": False, "error": mask(str(exc))})
+            raise
+        self._emit("api", {**record, "ok": True, "task_id": task_id})
+        return task_id
+
+    async def progress(self, text: str, *, force: bool = False) -> None:
+        """Show a progress line for the current background task in the web UI.
+
+        Calls are throttled to one per second unless ``force=True``. Outside a task the
+        text goes to the log.
+        """
+        if not self.task:
+            self.log(text)
+            return
+        now = time.monotonic()
+        if not force and now - self._last_progress < 1.0:
+            return
+        self._last_progress = now
+        try:
+            await self.tasks.progress(self.task.id, str(text)[:500])
+        except httpx.HTTPError:
+            pass
+
+    async def download(self, url: str, folder: str = "downloads", **options: Any):
+        """Download a video or audio with yt-dlp into the bot folder.
+
+        See ``bot_runner.media.download`` for the options. Returns a ``Download`` with
+        ``path``, ``title``, ``size`` and ``info``.
+        """
+        from .media import download
+
+        return await download(self, url, folder, **options)
+
     async def shell(
         self,
         *args: str | Path,
         timeout: float | None = None,
         cwd: str | Path | None = None,
     ) -> ShellResult:
-        """Run an external program (for example ``yt-dlp``) and collect its output.
+        """Run an external program and collect its output.
 
         ``cwd`` defaults to the bot folder.
         """

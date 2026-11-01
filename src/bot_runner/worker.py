@@ -1,4 +1,4 @@
-"""Runs one handler in its own process.
+"""Runs one handler call or background task in its own process.
 
 The parent (executor.py) writes a job as JSON to stdin. The worker streams events to
 stdout, one per line, each prefixed with MARKER: log lines, Bot API calls and finally
@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from .masking import mask, mask_value
-from .sdk import KV, BotApi, Context, Files, dumps
+from .sdk import BotApi, Context, Files, _Internal, dumps
 
 MARKER = "\x1e@runner "
 
@@ -57,20 +57,20 @@ class _PrintToLog(io.TextIOBase):
             self._buffer = ""
 
 
-def load_handler(code: str, version: int):
-    namespace: dict[str, Any] = {"__name__": f"handler_v{version}"}
-    exec(compile(code, f"<handler v{version}>", "exec"), namespace)  # noqa: S102
-    handler = namespace.get("handle")
-    if not callable(handler):
-        raise RuntimeError("handler code must define a function `handle(update, ctx)`")
-    return handler
+def load_module(code: str, name: str) -> dict[str, Any]:
+    namespace: dict[str, Any] = {"__name__": name}
+    exec(compile(code, f"<{name}>", "exec"), namespace)  # noqa: S102
+    return namespace
 
 
 async def run_job(job: dict, events: _Events) -> None:
     config = job["config"]
     bot = job["bot"]
+    handler = job.get("handler") or {}
+    kind = job.get("kind", "handler")
     root = Path(config["files_root"]) / str(bot["id"])
     root.mkdir(parents=True, exist_ok=True)
+    shared = config.get("shared_read_dir")
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=300.0)) as http:
         api = BotApi(
@@ -84,15 +84,33 @@ async def run_job(job: dict, events: _Events) -> None:
             update=job["update"],
             bot={"id": bot["id"], "username": bot.get("username")},
             api=api,
-            files=Files(root, Path(config["bot_api_data_dir"]), api),
-            kv=KV(http, config["orchestrator_url"], config["runner_secret"], bot["id"]),
+            files=Files(
+                root, Path(config["bot_api_data_dir"]), api, Path(shared) if shared else None
+            ),
+            internal=_Internal(http, config["orchestrator_url"], config["runner_secret"]),
             secrets=job.get("secrets", {}),
             http=http,
             emit=events.emit,
             dry_run=job.get("dry_run", False),
+            handler=handler,
+            task=job.get("task"),
+            code=job["code"],
+            origin=job.get("origin") or {},
         )
-        handler = load_handler(job["code"], job.get("version", 0))
-        result = handler(ctx.update, ctx)
+        module_name = handler.get("name") or "handler"
+        namespace = load_module(job["code"], f"{module_name} v{job.get('version', 0)}")
+        ctx._namespace = namespace
+        if kind == "task":
+            entry = job.get("entry", "")
+            func = namespace.get(entry)
+            if not callable(func):
+                raise RuntimeError(f"background task function `{entry}` is not defined")
+            result = func(ctx, *job.get("args", []), **job.get("kwargs", {}))
+        else:
+            func = namespace.get("handle")
+            if not callable(func):
+                raise RuntimeError("handler code must define a function `handle(update, ctx)`")
+            result = func(ctx.update, ctx)
         if inspect.isawaitable(result):
             await result
 

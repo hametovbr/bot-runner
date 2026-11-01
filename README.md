@@ -3,21 +3,26 @@
 The execution service for [bot-orchestrator](https://github.com/hametovbr/bot-orchestrator):
 it runs user-written Telegram bot handlers.
 
-> **Status:** MVP. Deploy it with the `docker-compose.yml` from bot-orchestrator.
+> **Status:** 0.2. Deploy it with the `docker-compose.yml` from bot-orchestrator.
 
 ## How it works
 
 - The orchestrator sends `POST /run` with the update, the bot, the handler code
-  and its secrets.
-- The runner starts a fresh Python process for the run, with a time limit
-  (`HANDLER_TIMEOUT`) and a memory limit (`HANDLER_MEMORY_MB`). A crash or a hang
-  only affects that run.
+  and its secrets. `kind: "handler"` calls `handle(update, ctx)`; `kind: "task"`
+  runs a background task function started with `ctx.background(...)`.
+- The runner starts a fresh Python process for every run, with a time limit
+  (`HANDLER_TIMEOUT` for handlers, `TASK_TIMEOUT` for tasks) and a memory limit
+  (`HANDLER_MEMORY_MB`). A crash or a hang only affects that run.
+- Handlers and tasks have separate concurrency limits (`MAX_CONCURRENT_RUNS`,
+  `MAX_CONCURRENT_TASKS`), so long downloads never block replies.
+- `POST /cancel/{run_id}` kills a running job.
 - Handler output (`print`, `ctx.log`) and every Bot API call are streamed back and
   shown in the orchestrator's update log. Bot tokens are masked.
 - In a dry run, only `get*` Bot API methods reach Telegram; other calls are
   recorded and not sent.
 
-The image includes `yt-dlp` (as a library and a command) and `ffmpeg`.
+The image includes `yt-dlp` (as a library and a command) and `ffmpeg`;
+`ctx.download(url)` wraps yt-dlp with a progress message in the chat.
 
 ## Example handler
 

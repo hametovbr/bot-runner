@@ -18,12 +18,18 @@ class Settings(BaseSettings):
     files_root: str = "/files"
     # Data directory of the local Bot API server (same path in every container).
     bot_api_data_dir: str = "/var/lib/telegram-bot-api"
-    # Hard limit for a single handler run, in seconds.
+    # Hard limit for a single handler call, in seconds.
     handler_timeout: float = 60.0
+    # Hard limit for a background task, in seconds.
+    task_timeout: float = 3600.0
     # Address-space limit for a handler process, in megabytes (0 = no limit).
     handler_memory_mb: int = 1024
     # Maximum number of handler processes running at the same time.
     max_concurrent_runs: int = 8
+    # Maximum number of background tasks running at the same time.
+    max_concurrent_tasks: int = 2
+    # Read-only folder handlers may read from, e.g. cookies files ("" disables).
+    shared_read_dir: str = "/shared"
 
 
 @lru_cache

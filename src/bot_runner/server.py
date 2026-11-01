@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -21,9 +21,20 @@ class BotInfo(BaseModel):
 
 class RunRequest(BaseModel):
     run_id: str | None = None
+    #: "handler" calls handle(update, ctx); "task" calls entry(ctx, *args, **kwargs).
+    kind: Literal["handler", "task"] = "handler"
     bot: BotInfo
     code: str
     version: int = 0
+    #: The handler the code belongs to: id and name (empty for unsaved test code).
+    handler: dict[str, Any] = Field(default_factory=dict)
+    entry: str = "handle"
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    #: The background task being run: id and title.
+    task: dict[str, Any] | None = None
+    #: Opaque data the orchestrator wants back in tasks this run starts (e.g. its log row).
+    origin: dict[str, Any] = Field(default_factory=dict)
     update: dict[str, Any]
     secrets: dict[str, str] = Field(default_factory=dict)
     dry_run: bool = False
@@ -31,7 +42,7 @@ class RunRequest(BaseModel):
 
 
 class RunResult(BaseModel):
-    status: str  # ok | error | timeout
+    status: str  # ok | error | timeout | cancelled
     error: str | None = None
     logs: list[str]
     api_calls: list[dict[str, Any]]
@@ -54,6 +65,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/run", dependencies=[Depends(check_secret)])
     async def run(request: RunRequest) -> RunResult:
         return RunResult(**await executor.run(request.model_dump()))
+
+    @app.post("/cancel/{run_id}", dependencies=[Depends(check_secret)])
+    async def cancel(run_id: str) -> dict[str, bool]:
+        return {"cancelled": executor.cancel(run_id)}
 
     return app
 
