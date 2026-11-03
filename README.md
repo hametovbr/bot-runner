@@ -45,9 +45,15 @@ async def handle(update, ctx):
         await ctx.reply(f"Saved {saved.name}")
 ```
 
-The SDK reference is in the
+The full SDK reference, with rules, limits and tested examples, is the
+[handler skill](https://github.com/hametovbr/bot-orchestrator/tree/main/skills/bot-orchestrator-handlers)
+in bot-orchestrator: an Agent Skill that AI agents can install to write handlers,
+and plain Markdown for people. The
 [architecture document](https://github.com/hametovbr/bot-orchestrator/blob/main/docs/ARCHITECTURE.md#handler-sdk)
-and on the orchestrator's Handler tab.
+has a summary.
+
+Changes to the public SDK must update that skill; `tests/test_sdk_surface.py`
+fails until the snapshot is updated together with it (see [AGENTS.md](AGENTS.md)).
 
 ## Configuration
 
