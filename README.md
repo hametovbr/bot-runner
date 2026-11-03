@@ -3,7 +3,7 @@
 The execution service for [bot-orchestrator](https://github.com/hametovbr/bot-orchestrator):
 it runs user-written Telegram bot handlers.
 
-> **Status:** 0.3. Deploy it with the `docker-compose.yml` from bot-orchestrator.
+> **Status:** 0.4. Deploy it with the `docker-compose.yml` from bot-orchestrator.
 
 ## How it works
 
@@ -24,6 +24,10 @@ it runs user-written Telegram bot handlers.
   versions.
 - Handler output (`print`, `ctx.log`) and every Bot API call are streamed back and
   shown in the orchestrator's update log. Bot tokens are masked.
+- Variables named `BOTENV_<NAME>` on the runner container reach handlers, tasks and
+  programs started with `ctx.shell` as `<NAME>` (read with `os.environ`). They are
+  read once at start; the container log lists the names that were passed and the
+  ones that were skipped.
 - In a dry run, only `get*` Bot API methods reach Telegram; other calls are
   recorded and not sent.
 
@@ -58,6 +62,30 @@ fails until the snapshot is updated together with it (see [AGENTS.md](AGENTS.md)
 ## Configuration
 
 All settings are environment variables; see [.env.example](.env.example).
+
+### Environment variables for handlers
+
+Set `BOTENV_<NAME>=value` on the runner, for example in `docker-compose.yml`:
+
+```yaml
+  bot-runner:
+    environment:
+      BOTENV_WEATHER_API_URL: https://api.example.com
+      BOTENV_DEFAULT_LANG: en
+```
+
+Handlers then read `os.environ["WEATHER_API_URL"]`. The rules:
+
+- The prefix is removed; the `BOTENV_*` originals are not in the handler environment.
+- A `BOTENV_` variable replaces a variable of the same name (`BOTENV_TZ` sets `TZ`
+  for handlers only).
+- Skipped, with a warning in the container log: an empty or invalid name, `PATH`,
+  names starting with `PYTHON` or `LD_`, and names of runner settings such as
+  `RUNNER_SECRET` or `HANDLER_TIMEOUT`.
+- The values are the same for every bot and are visible to every handler. For
+  passwords and API keys prefer the per-bot secrets of the orchestrator
+  (`ctx.secrets`).
+- Changes need a container restart.
 
 ## Development
 

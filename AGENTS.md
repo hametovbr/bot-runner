@@ -27,6 +27,18 @@ changes to the orchestrator–runner contract must be reflected there.
 - The container image is built by GitHub Actions and pushed to
   `ghcr.io/hametovbr/bot-runner`.
 
+## Releases
+
+1. Bump the version in `pyproject.toml` and `src/<package>/__init__.py`, run
+   `uv lock`, and add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md`.
+2. Release both repositories with the same version when a change spans them, and
+   bump "Matches bot-orchestrator X and bot-runner Y" in the handler skill.
+3. Merge to `main`, then push an annotated tag `vX.Y.Z` on that commit.
+4. CI fails if the tag differs from `pyproject.toml` or `CHANGELOG.md` has no
+   section for it. Otherwise it publishes `ghcr.io/hametovbr/<repo>:X.Y.Z` and
+   `:X.Y` and creates the GitHub release with that changelog section as notes.
+   `:latest` and `:<commit sha>` are published from `main`.
+
 ## Invariants
 
 - Every handler run has a timeout; a failing or hanging handler must not affect

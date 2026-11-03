@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import resource
 import sys
 import time
+from collections.abc import Mapping
 from typing import Any
 
+from . import handler_env
 from .config import Settings
 from .masking import mask
 from .packages import PackageManager
@@ -35,9 +38,16 @@ def _memory_limit(megabytes: int):
 class Executor:
     """Runs jobs in subprocesses. Handlers and background tasks have separate limits."""
 
-    def __init__(self, settings: Settings, packages: PackageManager | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        packages: PackageManager | None = None,
+        environ: Mapping[str, str] | None = None,
+    ):
         self._settings = settings
         self._packages = packages
+        # BOTENV_* variables are read once, at start; see handler_env.py.
+        self.handler_env = handler_env.build(os.environ if environ is None else environ)
         self._slots = {
             "handler": asyncio.Semaphore(settings.max_concurrent_runs),
             "task": asyncio.Semaphore(settings.max_concurrent_tasks),
@@ -93,6 +103,7 @@ class Executor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=STREAM_LIMIT,
+            env=self.handler_env.environ,
             preexec_fn=_memory_limit(s.handler_memory_mb),
         )
         if run_id:

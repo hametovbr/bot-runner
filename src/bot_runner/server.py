@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from . import __version__
+from . import __version__, handler_env
 from .config import Settings, get_settings
 from .executor import Executor
 from .packages import PackageManager
@@ -60,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     packages = PackageManager(settings.packages_dir)
     executor = Executor(settings, packages)
+    handler_env.log_summary(executor.handler_env)
     app = FastAPI(title="bot-runner", version=__version__, docs_url=None, redoc_url=None)
 
     def check_secret(x_runner_secret: Annotated[str | None, Header()] = None) -> None:
